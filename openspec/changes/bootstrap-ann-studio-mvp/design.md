@@ -1,119 +1,231 @@
 ## Context
 
-ANN Studio is defined as a web platform to design, configure, train, monitor, and manage neural-network models. The MVP must support tabular and computer-vision workflows while remaining practical for local developer machines.
+ANN Studio is an operations product for designing, running, monitoring, and governing neural-network workflows.
+The MVP must be credible for daily usage and leadership demos while remaining feasible on local developer machines.
 
-This change specifies architecture and module contracts only. It intentionally avoids generating application code or scaffolding frontend or backend services.
+This design defines architecture and delivery contracts for implementation readiness.
 
-## Architecture Overview
+## Design Objectives
 
-ANN Studio MVP uses a two-plane architecture:
+- Keep strict separation between control plane and training plane.
+- Guarantee reproducibility and lineage as non-negotiable product behavior.
+- Support both tabular and CV paths in one orchestration surface.
+- Deliver a dashboard-first UI that reflects operational status clearly.
+- Keep the runtime local-first with explicit upgrade path to larger deployments.
 
-- Control plane: Web APIs and orchestration services responsible for dataset lifecycle, model configuration, run lifecycle, metrics aggregation, and model registry.
-- Training plane: Executable training workers that consume run plans, access datasets and artifacts, execute model training, and emit metrics and checkpoints.
+## System Architecture
 
-Data and tracking infrastructure:
+ANN Studio MVP uses two execution planes and shared data infrastructure.
 
-- PostgreSQL stores product metadata and lineage relationships.
-- Object storage stores dataset payloads, dataset snapshots, checkpoints, and trained model artifacts.
-- MLflow tracks experiment runs, scalar metrics, and training artifacts and is linked to control-plane run records.
+### Control plane
+- Owns product APIs, orchestration logic, validation, metadata persistence, audit events, and dashboard query surfaces.
+- Is the source of truth for run identity, run state, lineage references, and policy checks.
 
-Deployment and runtime model:
+### Training plane
+- Executes training jobs from immutable run plans.
+- Writes artifacts and checkpoints to object storage.
+- Emits status and metric events back to control-plane contracts.
 
-- Docker-first local development environment.
-- Intended to run on developer machines first, with clear service boundaries for future scale-out.
+### Shared infrastructure
+- PostgreSQL for transactional metadata and lineage queries.
+- Object storage for dataset payloads, checkpoints, and model artifacts.
+- MLflow for experiment metrics and artifact tracking, linked by control-plane run IDs.
 
-## Goals / Non-Goals
+## Product Operating Flows
 
-**Goals:**
-- Define production-oriented module boundaries and contracts for MVP capabilities.
-- Guarantee reproducibility through immutable run metadata and lineage across dataset version, configuration, and model artifact.
-- Support both tabular and CV model families within a shared orchestration surface.
-- Ensure metrics visibility during training and diagnostics for quality issues.
+### Flow 1: Dataset to run launch
+1. User registers dataset and creates immutable dataset version.
+2. User defines split configuration for that version.
+3. User selects model definition and training configuration.
+4. Control plane validates compatibility and creates run plan.
+5. Training plane receives run plan and starts execution.
 
-**Non-Goals:**
-- Implementing source code, UI components, or API endpoints in this change.
-- Cluster scheduling and distributed autoscaling.
-- Enterprise multi-tenant policy management.
-- Any AGPL-licensed implementation dependency for model training.
+### Flow 2: Live run monitoring
+1. Training plane emits status and metrics periodically.
+2. Control plane persists event stream and derived diagnostics.
+3. Dashboard surfaces recent runs, KPI updates, and alerts.
 
-## Main Domains and Modules
+### Flow 3: Model registration
+1. User selects completed run output.
+2. Control plane enforces completed-run-only policy.
+3. Model registry stores model version metadata and lineage links.
 
-1. Workspace Security Module
-- Scope: authentication baseline, authorization hooks, secret management policy, and audit event recording.
-- Responsibilities: enforce access boundaries to sensitive actions and data references.
+### Flow 4: Reproducibility inspection
+1. User opens historical run or model version.
+2. System returns immutable references to dataset version, model definition, config snapshot, and artifacts.
 
-2. Dataset Management Module
-- Scope: tabular and CV dataset registration, metadata management, versioning, split templates, and run-bound dataset resolution.
-- Responsibilities: immutable dataset versions and validated split assignments.
+## Domain Modules
 
-3. Model Design Module
-- Scope: model family templates and configuration schema for tabular ANN and in-house one-stage detector.
-- Responsibilities: validated model definitions and compatibility checks between model family and dataset type.
+1. Workspace Security
+- Authentication and authorization baseline.
+- Audit events and secret redaction policy.
 
-4. Run Orchestration Module
-- Scope: run creation, queueing, launching, status transitions, checkpoint policy, and reproducibility metadata capture.
-- Responsibilities: deterministic run records and control-plane to training-plane handoff.
+2. Dataset Management
+- Dataset identity, metadata, versions, split policy.
+- Validation by dataset type.
 
-5. Metrics and Diagnostics Module
-- Scope: real-time metric ingestion, train-validation curve generation, classification and detection metric surfaces, and heuristic diagnostics.
-- Responsibilities: expose actionable live feedback and post-run summaries.
+3. Model Design
+- Model-family templates and config schema.
+- Non-AGPL guardrails for detector path.
 
-6. Model Registry Module
-- Scope: model registration, version catalog, governance metadata, and lineage traversal.
-- Responsibilities: controlled promotion from run artifacts to registered model versions.
+4. Run Orchestration
+- Run creation, lifecycle transitions, launch handoff.
+- Checkpoint policy and reproducibility snapshot.
 
-## Key Entities
+5. Metrics and Diagnostics
+- Near-real-time curve ingestion and aggregation.
+- Advisory underfitting and overfitting diagnostics.
 
-- Workspace: logical boundary for users, projects, and security context.
-- Dataset: logical dataset identity with type (tabular or CV) and metadata.
-- DatasetVersion: immutable dataset snapshot with schema summary and storage URI.
-- SplitConfig: train-validation-test split policy linked to DatasetVersion.
-- ModelDefinition: model family and architecture configuration payload.
-- TrainingConfig: hyperparameters and runtime knobs for a run.
-- Run: orchestrated training execution instance with immutable run ID.
-- RunArtifact: checkpoint or output artifact associated with a run.
-- MetricStream: time-series metric events for training and validation.
-- DiagnosticSignal: derived signal indicating likely underfitting or overfitting.
-- ModelVersion: registered model entity linked to run, artifacts, and dataset lineage.
+6. Model Registry
+- Model registration from completed runs only.
+- Query and lineage traversal.
 
-## Boundaries Between Modules
+## Data and Ownership Boundaries
 
-- Dataset Management owns dataset metadata, versions, and split policies; Run Orchestration consumes resolved dataset version references and cannot mutate dataset state.
-- Model Design owns model family constraints and config validation; Run Orchestration consumes validated ModelDefinition and TrainingConfig snapshots.
-- Run Orchestration owns run lifecycle state transitions; Metrics and Diagnostics can append metrics and diagnostics but cannot alter run identity or config snapshots.
-- Model Registry consumes completed run outputs and lineage references; it cannot register models from non-terminal or failed runs.
-- Workspace Security policies apply cross-cutting controls across all modules and records audit events for privileged operations.
+- Dataset Management owns Dataset and DatasetVersion write paths.
+- Model Design owns ModelDefinition and TrainingConfig schema validation.
+- Run Orchestration owns Run state machine and immutable run snapshots.
+- Metrics and Diagnostics owns MetricStream and DiagnosticSignal append operations.
+- Model Registry owns ModelVersion metadata but consumes immutable upstream lineage references.
+- Workspace Security is cross-cutting and records audit outcomes for privileged operations.
 
-## Technology Choices
+No module can mutate another module's immutable historical records.
 
-- Containerization: Docker and Docker Compose for local-first, reproducible development runtime.
-- Metadata store: PostgreSQL for transactional consistency and relational lineage queries.
-- Artifact and dataset storage: object storage abstraction for dataset payloads, checkpoints, and model artifacts.
-- Experiment tracking: MLflow for experiment metadata, metric timelines, and artifact linkage.
-- Communication pattern: control-plane APIs trigger run plans; training plane reports status and metrics through explicit contracts.
+## Dashboard Information Contract
+
+The home dashboard must support these information blocks for MVP:
+
+- KPI cards: running jobs, recent completion success, dataset readiness, registry candidates.
+- Recent runs panel: run identity, project, model family, status, progress, updated timestamp.
+- Alerts panel: open operational issues requiring action.
+- Quick actions panel: launch run, import dataset, create model config, register candidate.
+
+This contract aligns UI behavior to backend query surfaces without forcing component-level implementation details in this spec.
 
 ## Non-Functional Requirements
 
-- Reproducibility: each run MUST persist immutable references to dataset version, model definition, and training config snapshot.
-- Auditability: privileged operations (dataset registration, run launch, model registration) MUST emit audit events.
-- Observability: metric ingestion latency and run status updates MUST support near-real-time UX expectations during active training.
-- Reliability: failed training jobs MUST be represented as explicit terminal states with diagnostic payloads.
-- Security baseline: secrets MUST not be persisted in plain text in metadata stores or logs.
-- Portability: local deployment MUST be executable through documented Docker-first workflows.
+- Reproducibility: every run persists immutable references to dataset version, model definition, and training config snapshot.
+- Auditability: privileged operations produce audit records with actor, action, resource, outcome, and timestamp.
+- Security: secrets are redacted in logs and never persisted in plaintext metadata fields.
+- Reliability: failed runs are terminal and include failure diagnostics.
+- Observability: active run status and metric updates are near-real-time for dashboard UX.
+- Portability: local deployment is executable through Docker-first workflow.
+- Maintainability: implementation MUST avoid monolithic files and spaghetti patterns by using modular, cohesive units.
+- Structural consistency: codebase MUST use feature-first folder organization and explicit separation of concerns.
+- Layering: frontend and backend MUST separate presentation, application/service logic, domain logic, and infrastructure concerns into distinct modules/files.
 
-## Risks / Trade-offs
+## MVP v1 Code Organization Standard
 
-- Local-first environment may mask issues that appear in distributed execution.
-	- Mitigation: enforce clear service contracts and avoid local-only coupling patterns.
-- Mixing tabular and CV support in one MVP increases schema and validation complexity.
-	- Mitigation: keep dataset and model family validation strict and explicit by type.
-- MLflow plus internal metadata can cause duplication of run information.
-	- Mitigation: define source of truth rules and store cross-references rather than duplicate payloads.
-- Heuristic diagnostics can produce false positives for underfitting or overfitting.
-	- Mitigation: mark diagnostics as advisory and expose underlying metric evidence.
+The MVP implementation MUST use the following feature-first structure patterns.
 
-## Open Questions
+### Frontend standard
 
-- Which object storage backend is preferred for local developer machines by default?
-- Should run orchestration include retry policies in MVP or defer retries to post-MVP?
-- What minimum metric refresh interval is acceptable for live curves in local environments?
+- apps/web/src/app
+	- shell and top-level routing/composition
+- apps/web/src/shared
+	- reusable UI primitives, common hooks, utilities, and API client plumbing
+- apps/web/src/features/dashboard
+	- ui
+	- services
+	- types
+- apps/web/src/features/datasets
+	- ui
+	- services
+	- types
+- apps/web/src/features/runs
+	- ui
+	- services
+	- types
+- apps/web/src/features/model-registry
+	- ui
+	- services
+	- types
+- apps/web/src/features/metrics
+	- ui
+	- services
+	- types
+
+Frontend implementation rules:
+
+- Feature UI files MUST not contain low-level persistence or network client details.
+- Shared utilities MUST be generic and reusable across features.
+- Feature modules MUST expose clear public entry points through index files.
+- No single frontend file should accumulate unrelated feature logic.
+
+### Backend standard
+
+- apps/api/src/app
+	- application bootstrap and dependency wiring
+- apps/api/src/shared
+	- common config, logging, error handling, and infrastructure abstractions
+- apps/api/src/features/workspace-security
+	- presentation
+	- application
+	- domain
+	- infrastructure
+- apps/api/src/features/dataset-management
+	- presentation
+	- application
+	- domain
+	- infrastructure
+- apps/api/src/features/model-design
+	- presentation
+	- application
+	- domain
+	- infrastructure
+- apps/api/src/features/run-orchestration
+	- presentation
+	- application
+	- domain
+	- infrastructure
+- apps/api/src/features/metrics-diagnostics
+	- presentation
+	- application
+	- domain
+	- infrastructure
+- apps/api/src/features/model-registry
+	- presentation
+	- application
+	- domain
+	- infrastructure
+
+Backend implementation rules:
+
+- Presentation layer handles transport concerns only.
+- Application layer orchestrates use cases and transactions.
+- Domain layer owns core business rules and invariants.
+- Infrastructure layer implements repositories, storage adapters, and external integrations.
+- Cross-feature dependencies MUST go through application contracts, not direct infrastructure coupling.
+
+## Delivery Strategy
+
+Implementation should proceed in vertical slices:
+
+1. Slice A: Dataset and model definition contracts end-to-end validation.
+2. Slice B: Run launch and lifecycle tracking with basic checkpoint references.
+3. Slice C: Live metrics and diagnostics visible in dashboard blocks.
+4. Slice D: Model registration and lineage traversal.
+5. Slice E: security hardening and cross-cutting verification.
+
+Each slice must preserve architecture boundaries and produce testable acceptance outputs.
+
+## Risks and Mitigations
+
+- Risk: dual support for tabular and CV increases validation complexity.
+- Mitigation: strict type-specific schemas and compatibility checks before run creation.
+
+- Risk: duplicated run data between internal metadata and MLflow.
+- Mitigation: internal run ID as canonical key; MLflow referenced by cross-link, not duplicated.
+
+- Risk: advisory diagnostics can create false positives.
+- Mitigation: include supporting metric evidence in every diagnostic payload.
+
+- Risk: local-first runtime may hide distributed system issues.
+- Mitigation: preserve explicit contracts and avoid local-only shortcuts in interfaces.
+
+## Open Decisions
+
+- Default local object storage backend.
+- Retry behavior for failed runs in MVP.
+- Metric refresh target and acceptable latency under local constraints.
+- Minimum dashboard SLA for run-state freshness.

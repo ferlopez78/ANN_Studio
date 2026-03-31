@@ -1,65 +1,82 @@
 ## Why
 
-Teams building neural-network solutions need a single platform that standardizes dataset lifecycle, model configuration, training execution, and model governance. ANN Studio currently lacks a formal product contract for those workflows, which creates ambiguity in implementation, slows delivery, and increases risk of non-reproducible training outcomes.
+ANN Studio needs a concrete MVP contract that teams can implement without ambiguity.
+Today, requirements are known at a high level but delivery risk remains in three areas:
 
-Defining a clear MVP change now enables implementation to proceed in phases with explicit requirements, testable scenarios, and architectural boundaries that fit local developer machines while preserving a path to future scale.
+- unclear boundary between control plane and training plane responsibilities
+- incomplete traceability rules for reproducibility and model governance
+- no shared implementation sequence across product, backend, ML, and UI work
+
+This change defines an implementation-ready MVP blueprint so execution can start with explicit scope, measurable acceptance criteria, and clear architectural constraints.
 
 ## Goals
 
-- Establish ANN Studio as a web-based control plane for creating and managing neural-network training runs.
-- Support both tabular and computer-vision dataset workflows with versioned metadata and run-bound dataset selection.
-- Define model family requirements for tabular ANN classifiers and an in-house one-stage detector implementation.
-- Ensure reproducibility through lineage from dataset version and training configuration to run outputs and registered models.
-- Provide real-time training diagnostics and actionable heuristics for likely underfitting and overfitting.
+- Define ANN Studio as a web product control plane for datasets, model design, run operations, diagnostics, and registry workflows.
+- Preserve strict reproducibility through immutable lineage from dataset version and run config to artifacts and model versions.
+- Support tabular ANN classification and in-house one-stage detector flows in one unified product surface.
+- Provide a dashboard-first operating experience for technical and business users.
+- Establish a local-first runtime that is reliable on developer machines and extensible later.
 
 ## MVP Scope
 
-- Dataset management for tabular and computer vision datasets, including metadata, versioning, configurable train-validation-test splits, and run-specific dataset selection.
-- Model design for:
-	- Tabular ANN binary classification.
-	- Tabular ANN multiclass classification.
-	- Custom one-stage object detector implemented in-house with no dependency on AGPL implementation code.
-- Training configuration with explicit controls for hidden layers, activations, dropout, batch normalization, optimizer, learning rate, scheduler, regularization, early stopping, batch size, epochs, seed, loss function, and evaluation metrics.
-- Run orchestration for creating and launching runs, tracking status, checkpoint persistence, run comparison, and reproducibility metadata.
-- Live metrics and diagnostics including train and validation curves, classification metrics for tabular models, detection metrics for CV models, and heuristics for likely underfitting and overfitting.
-- Model management through model registration, model metadata, and lineage to dataset version, configuration, and training run.
+### Included in MVP
+- Workspace security baseline for authenticated access, operation-level authorization, redaction, and audit events.
+- Dataset management for tabular and CV datasets with immutable versioning and split configuration.
+- Model design contracts for tabular ANN binary, tabular ANN multiclass, and in-house one-stage detector.
+- Run orchestration with immutable run identity, run lifecycle state machine, launch handoff, checkpoints, and run comparison.
+- Metrics and diagnostics with near-real-time curves, model-family metric surfaces, and advisory overfitting and underfitting signals.
+- Model registry with registration from completed runs only and full lineage links.
+- Dashboard-level UX contract that prioritizes KPI visibility, recent runs, alerts, and quick actions.
 
-## Out of Scope
+### Deferred from MVP
+- Distributed scheduling and autoscaling orchestration.
+- Enterprise identity providers and advanced multi-tenant policy controls.
+- Inference serving workspace and endpoint lifecycle management.
+- Automated model promotion pipelines across environments.
+- Dark mode and advanced theming.
 
-- Production cluster deployment, autoscaling, or multi-region infrastructure.
-- Enterprise IAM integration and multi-tenant authorization policy.
-- Automated CI-CD release pipelines for model promotion.
-- Third-party AGPL code or AGPL-derived implementation assets.
-- Building the application source code in this change.
+## Capability Coverage in This Change
 
-## What Changes
+### Added capability deltas
+- workspace-security
+- dataset-management
+- model-design
+- run-orchestration
+- metrics-diagnostics
+- model-registry
 
-- Add new OpenSpec capability specs for workspace security, dataset management, model design, run orchestration, metrics diagnostics, and model registry.
-- Define architecture constraints and module boundaries for control plane and training plane separation.
-- Define technical decisions for Docker-first local development, PostgreSQL metadata persistence, object storage for datasets and artifacts, and MLflow tracking integration.
-- Define phased and verifiable implementation tasks without generating backend or frontend scaffolding.
+### Explicitly deferred capability deltas
+- app-bootstrap
+- experiment-registry
+- inference-workspace
+- training-workflows
 
-## Capabilities
-
-### New Capabilities
-- `workspace-security`: Baseline security controls for workspace access, secrets handling, and auditability in a local-first environment.
-- `dataset-management`: Dataset ingestion, metadata, versioning, split configuration, and run-bound dataset selection.
-- `model-design`: Supported model families and configuration surface for tabular ANN and in-house one-stage detector.
-- `run-orchestration`: Run creation, launch, status lifecycle, checkpoints, comparisons, and reproducibility metadata.
-- `metrics-diagnostics`: Real-time metrics streams, model-family-specific evaluation outputs, and training quality heuristics.
-- `model-registry`: Model registration, metadata, and lineage from run and dataset version to deployable artifact.
-
-### Modified Capabilities
-- None.
+Deferred capabilities remain as placeholders and will be addressed in follow-up OpenSpec changes.
 
 ## Business and Technical Rationale
 
-- Business rationale: A unified MVP reduces time-to-experiment and improves confidence in model outcomes by making run tracking and lineage first-class product features.
-- Technical rationale: Early specification of architecture, entities, and interfaces lowers integration risk across data, training, and governance workflows.
-- Compliance rationale: Explicit exclusion of AGPL implementation dependencies prevents downstream licensing conflicts for commercial adoption.
+- Business: leadership and delivery teams need one credible operational product narrative, not separate ad hoc tools.
+- Product: the dashboard-first layout supports daily operational decisions and demo-readiness.
+- Technical: explicit contracts reduce integration drift between UI, backend services, training workers, and tracking systems.
+- Compliance: non-AGPL policy remains explicit for the in-house detector path.
+
+## Success Criteria
+
+This change is considered ready for implementation when:
+
+- proposal, design, and tasks are internally consistent
+- all in-scope capability deltas are complete and testable
+- deferred capabilities are explicitly listed and not implied as in-scope
+- cross-cutting reproducibility and security constraints are mapped to validation tasks
 
 ## Impact
 
-- Affects only OpenSpec artifacts under openspec/changes/bootstrap-ann-studio-mvp.
-- Establishes requirements baseline for future backend and frontend implementation phases.
-- Confirms initial platform assumptions: Docker-first local development, PostgreSQL metadata store, object storage for datasets and artifacts, and MLflow for tracking.
+- Affects OpenSpec artifacts under openspec/changes/bootstrap-ann-studio-mvp.
+- Provides the source-of-truth plan for MVP implementation sequencing.
+- Enables execution in vertical slices without changing architecture boundaries.
+
+## Open Decisions
+
+- Which local object storage backend will be the default for developer setup?
+- What is the MVP target for live metric refresh interval under local runtime constraints?
+- Should run retry policy be included in MVP or deferred?
