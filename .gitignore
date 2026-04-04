@@ -43,6 +43,7 @@ mlruns/
 checkpoints/
 outputs/
 logs/
+*.tar
 *.pt
 *.pth
 *.onnx
