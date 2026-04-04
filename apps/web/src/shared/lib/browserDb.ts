@@ -99,3 +99,29 @@ export async function saveToDatabase<T>(key: string, value: T): Promise<void> {
     // Keep UI responsive when browser storage is unavailable.
   }
 }
+
+export async function clearDatabase(keysToRemoveFromLocalStorage: string[] = []): Promise<void> {
+  if (typeof window === 'undefined') {
+    return
+  }
+
+  if (window.indexedDB) {
+    try {
+      const db = await openDb()
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite')
+        const store = tx.objectStore(STORE_NAME)
+        const request = store.clear()
+
+        request.onsuccess = () => resolve()
+        request.onerror = () => reject(request.error ?? new Error('IndexedDB clear failed'))
+      })
+    } catch {
+      // Ignore cleanup issues to avoid blocking app startup.
+    }
+  }
+
+  for (const key of keysToRemoveFromLocalStorage) {
+    window.localStorage.removeItem(key)
+  }
+}

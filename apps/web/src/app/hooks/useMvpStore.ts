@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
 
 import { LocalModelArtifactGenerator } from '../../features/model-design/services/artifactGenerator'
+import { fetchDatasets } from '../../features/datasets/services/datasetManagementApi'
+import {
+  fetchClients,
+  fetchProjects,
+} from '../../features/projects/services/projectManagementApi'
+import {
+  createControlPlaneActions,
+} from './entities/controlPlaneActions'
+import { createRunActions } from './entities/runActions'
 import {
   buildModelArtifactUri,
   removeModelArtifact,
@@ -9,73 +18,31 @@ import {
 import type { GeneratedModelArtifact, ModelDesignDraft } from '../../features/model-design/types'
 import { menuItems } from '../../shared/config/navigation'
 import { initialDatasets, initialModels, initialProjects, initialRuns } from '../../shared/config/seeds'
-import { loadFromDatabase, saveToDatabase } from '../../shared/lib/browserDb'
+import { clearDatabase, loadFromDatabase, saveToDatabase } from '../../shared/lib/browserDb'
 import type {
   DatasetRecord,
-  DatasetType,
+  ClientRecord,
+  ClientStatus,
   KpiCard,
   ModelVersion,
-  ProjectNetworkType,
   ProjectRecord,
-  ProjectStatus,
-  RunEpochTelemetry,
-  RunLiveMonitor,
   RunRecord,
   RunStatus,
 } from '../../shared/types/mvp'
 
 export type MenuItem = (typeof menuItems)[number]
 
-type CreateRunInput = {
-  name: string
-  project: string
-  model: string
-  datasetId: string
-  selectedFile: string
-  epochs: number
-  batchSize: number
-  learningRate: number
-  earlyStopping: boolean
-  earlyStoppingPatience: number
-}
-
-type CreateDatasetInput = {
-  name: string
-  type: DatasetType
-  projectIds: string[]
-}
-
-type UpdateDatasetInput = {
-  id: string
-  name: string
-  type: DatasetType
-  projectIds: string[]
-}
-
-type CreateProjectInput = {
-  name: string
-  createdOn: string
-  status: ProjectStatus
-  networkType: ProjectNetworkType
-  datasetIds: string[]
-  modelIds: string[]
-  modelCombinations: string[]
-}
-
-type UpdateProjectInput = {
-  id: string
-  name: string
-  createdOn: string
-  networkType: ProjectNetworkType
-  datasetIds: string[]
-  modelIds: string[]
-  modelCombinations: string[]
-}
-
-const DATASETS_KEY = 'annstudio_datasets'
-const RUNS_KEY = 'annstudio_runs'
-const MODELS_KEY = 'annstudio_models'
-const PROJECTS_KEY = 'annstudio_projects'
+const DATASETS_KEY = 'annstudio_v2_datasets'
+const CLIENTS_KEY = 'annstudio_v2_clients'
+const RUNS_KEY = 'annstudio_v2_runs'
+const MODELS_KEY = 'annstudio_v2_models'
+const PROJECTS_KEY = 'annstudio_v2_projects'
+const LEGACY_DATASETS_KEY = 'annstudio_datasets'
+const LEGACY_CLIENTS_KEY = 'annstudio_clients'
+const LEGACY_RUNS_KEY = 'annstudio_runs'
+const LEGACY_MODELS_KEY = 'annstudio_models'
+const LEGACY_PROJECTS_KEY = 'annstudio_projects'
+const RESET_MARKER_KEY = 'annstudio_reset_done_v1'
 let idSequence = 1000
 const artifactGenerator = new LocalModelArtifactGenerator()
 
@@ -187,126 +154,28 @@ function normalizeIds(values: string[]): string[] {
   return Array.from(new Set(values.filter((value) => value.trim().length > 0)))
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value))
-}
-
-function buildLayerNames(model: string): string[] {
-  if (model === 'ANN Multiclass') {
-    return ['Input', 'Dense 1', 'Dense 2', 'Dense 3', 'Output']
-  }
-
-  return ['Input', 'Dense 1', 'Dense 2', 'Output']
-}
-
-function generateConfusionMatrix(model: string, precision: number): number[][] {
-  const safePrecision = clamp(precision, 0.2, 0.999)
-
-  if (model === 'ANN Multiclass') {
-    const totalPerClass = 100
-    const tpA = Math.round(totalPerClass * safePrecision)
-    const tpB = Math.round(totalPerClass * (safePrecision - 0.03))
-    const tpC = Math.round(totalPerClass * (safePrecision - 0.05))
-
-    const offA = totalPerClass - tpA
-    const offB = totalPerClass - tpB
-    const offC = totalPerClass - tpC
-
-    return [
-      [tpA, Math.round(offA * 0.55), Math.round(offA * 0.45)],
-      [Math.round(offB * 0.48), tpB, Math.round(offB * 0.52)],
-      [Math.round(offC * 0.42), Math.round(offC * 0.58), tpC],
-    ]
-  }
-
-  const positives = 120
-  const negatives = 120
-  const tp = Math.round(positives * safePrecision)
-  const tn = Math.round(negatives * (safePrecision - 0.02))
-  const fn = positives - tp
-  const fp = negatives - tn
-
-  return [
-    [tn, fp],
-    [fn, tp],
-  ]
-}
-
-function advanceRunEpoch(run: RunRecord): RunRecord {
-  if (!run.monitor || !run.trainingConfig || run.status !== 'Running') {
-    return run
-  }
-
-  const nextEpoch = run.monitor.currentEpoch + 1
-  const totalEpochs = run.monitor.totalEpochs
-
-  const decay = Math.exp(-nextEpoch / Math.max(2, totalEpochs * 0.32))
-  const overfitPressure =
-    nextEpoch > totalEpochs * 0.65 ? ((nextEpoch - totalEpochs * 0.65) / Math.max(1, totalEpochs * 0.35)) * 0.08 : 0
-  const noise = (((nextEpoch * 13) % 7) - 3) / 400
-
-  const trainLoss = clamp(1.2 * decay + 0.03 + noise, 0.01, 2)
-  const valLoss = clamp(trainLoss + 0.035 + overfitPressure + noise / 2, 0.01, 2)
-  const trainPrecision = clamp(1 - trainLoss * 0.62, 0.35, 0.999)
-  const valPrecision = clamp(trainPrecision - 0.025 - overfitPressure * 0.8, 0.3, 0.999)
-
-  const cosineDecay = 0.15 + 0.85 * 0.5 * (1 + Math.cos((Math.PI * nextEpoch) / Math.max(1, totalEpochs)))
-  const learningRate = Number((run.trainingConfig.learningRate * cosineDecay).toFixed(6))
-
-  const layerActivations = run.monitor.layerNames.map((_, layerIndex) =>
-    Number(clamp(0.18 + ((Math.sin((nextEpoch + 1) * (layerIndex + 1) * 0.9) + 1) / 2) * 0.72, 0.05, 0.98).toFixed(3)),
-  )
-
-  const confusionMatrix = generateConfusionMatrix(run.model, valPrecision)
-  const epochTelemetry: RunEpochTelemetry = {
-    epoch: nextEpoch,
-    trainLoss: Number(trainLoss.toFixed(4)),
-    valLoss: Number(valLoss.toFixed(4)),
-    trainPrecision: Number(trainPrecision.toFixed(4)),
-    valPrecision: Number(valPrecision.toFixed(4)),
-    learningRate,
-    layerActivations,
-    confusionMatrix,
-  }
-
-  const bestValLoss = Math.min(run.monitor.bestValLoss, valLoss)
-  const improved = valLoss < run.monitor.bestValLoss - 0.0001
-  const staleEpochs = improved ? 0 : run.monitor.staleEpochs + 1
-
-  const shouldEarlyStop =
-    run.trainingConfig.earlyStopping &&
-    staleEpochs >= run.trainingConfig.earlyStoppingPatience &&
-    nextEpoch >= Math.min(8, totalEpochs)
-
-  const reachedEnd = nextEpoch >= totalEpochs
-  const completed = shouldEarlyStop || reachedEnd
-  const progress = completed ? 100 : Math.round((nextEpoch / totalEpochs) * 100)
-
-  const nextMonitor: RunLiveMonitor = {
-    ...run.monitor,
-    currentEpoch: nextEpoch,
-    bestValLoss: Number(bestValLoss.toFixed(4)),
-    staleEpochs,
-    earlyStopTriggered: shouldEarlyStop,
-    history: [...run.monitor.history, epochTelemetry],
-    lastLearningRate: learningRate,
-    lastTrainPrecision: Number(trainPrecision.toFixed(4)),
-    lastValPrecision: Number(valPrecision.toFixed(4)),
-    confusionMatrix,
-  }
-
+function toClientRecord(input: {
+  id: string
+  code: string
+  name: string
+  status: ClientStatus
+  notes?: string | null
+  updatedAtUtc?: string
+}): ClientRecord {
   return {
-    ...run,
-    status: completed ? 'Completed' : 'Running',
-    progress,
-    updated: `Today ${toTimeLabel()}`,
-    monitor: nextMonitor,
+    id: input.id,
+    code: input.code,
+    name: input.name,
+    status: input.status,
+    notes: input.notes ?? undefined,
+    updated: input.updatedAtUtc ? new Date(input.updatedAtUtc).toLocaleString() : `Today ${toTimeLabel()}`,
   }
 }
 
 export function useMvpStore() {
   const [activeView, setActiveView] = useState<MenuItem>('Dashboard')
   const [datasets, setDatasets] = useState<DatasetRecord[]>(initialDatasets)
+  const [clients, setClients] = useState<ClientRecord[]>([])
   const [runs, setRuns] = useState<RunRecord[]>(initialRuns)
   const [models, setModels] = useState<ModelVersion[]>(initialModels)
   const [projects, setProjects] = useState<ProjectRecord[]>(initialProjects)
@@ -317,8 +186,26 @@ export function useMvpStore() {
     let mounted = true
 
     async function hydrateStore() {
-      const [savedDatasets, savedRuns, savedModels, savedProjects] = await Promise.all([
+      const resetAlreadyDone = window.localStorage.getItem(RESET_MARKER_KEY) === '1'
+      if (!resetAlreadyDone) {
+        await clearDatabase([
+          DATASETS_KEY,
+          CLIENTS_KEY,
+          RUNS_KEY,
+          MODELS_KEY,
+          PROJECTS_KEY,
+          LEGACY_DATASETS_KEY,
+          LEGACY_CLIENTS_KEY,
+          LEGACY_RUNS_KEY,
+          LEGACY_MODELS_KEY,
+          LEGACY_PROJECTS_KEY,
+        ])
+        window.localStorage.setItem(RESET_MARKER_KEY, '1')
+      }
+
+      const [savedDatasets, savedClients, savedRuns, savedModels, savedProjects] = await Promise.all([
         loadFromDatabase(DATASETS_KEY, initialDatasets),
+        loadFromDatabase(CLIENTS_KEY, [] as ClientRecord[]),
         loadFromDatabase(RUNS_KEY, initialRuns),
         loadFromDatabase(MODELS_KEY, initialModels),
         loadFromDatabase(PROJECTS_KEY, initialProjects),
@@ -336,6 +223,7 @@ export function useMvpStore() {
       }
 
       setDatasets(sanitized.datasets)
+      setClients(savedClients)
       setRuns(sanitized.runs)
       setModels(sanitized.models)
       setProjects(sanitized.projects)
@@ -356,6 +244,14 @@ export function useMvpStore() {
 
     void saveToDatabase(DATASETS_KEY, datasets)
   }, [datasets, hydrated])
+
+  useEffect(() => {
+    if (!hydrated) {
+      return
+    }
+
+    void saveToDatabase(CLIENTS_KEY, clients)
+  }, [clients, hydrated])
 
   useEffect(() => {
     if (!hydrated) {
@@ -386,12 +282,78 @@ export function useMvpStore() {
       return
     }
 
-    const intervalId = window.setInterval(() => {
-      setRuns((prev) => prev.map((run) => advanceRunEpoch(run)))
-    }, 900)
+    let cancelled = false
+
+    async function syncProjectManagementFromBackend(): Promise<void> {
+      try {
+        const [backendClients, backendProjects, backendDatasets] = await Promise.all([
+          fetchClients(),
+          fetchProjects(),
+          fetchDatasets(),
+        ])
+        if (cancelled) {
+          return
+        }
+
+        const datasetIdsByProjectId = new Map<string, Set<string>>()
+        backendDatasets.forEach((dataset) => {
+          dataset.projectIds.forEach((projectId) => {
+            const current = datasetIdsByProjectId.get(projectId) ?? new Set<string>()
+            current.add(dataset.id)
+            datasetIdsByProjectId.set(projectId, current)
+          })
+        })
+
+        setClients(
+          backendClients.map((item) =>
+            toClientRecord({
+              id: item.id,
+              code: item.code,
+              name: item.name,
+              status: item.status,
+              notes: item.notes,
+              updatedAtUtc: item.updatedAtUtc,
+            }),
+          ),
+        )
+
+        setProjects(
+          backendProjects.map((item) => ({
+            id: item.id,
+            code: item.code,
+            clientId: item.clientId,
+            clientName: item.clientName ?? undefined,
+            name: item.name,
+            createdOn: item.createdAtUtc.slice(0, 10),
+            status: item.status,
+            networkType: item.networkType,
+            ptStatus: 'Not Created',
+            datasetIds: normalizeIds([...(item.datasetIds ?? []), ...Array.from(datasetIdsByProjectId.get(item.id) ?? [])]),
+            modelIds: item.modelIds,
+            modelCombinations: item.modelCombinations,
+            updated: new Date(item.updatedAtUtc).toLocaleString(),
+          })),
+        )
+
+        setDatasets(
+          backendDatasets.map((item) => ({
+            id: item.id,
+            name: item.name,
+            type: item.type,
+            versions: item.versions,
+            status: item.status,
+            updated: new Date(item.updatedAtUtc).toLocaleString(),
+          })),
+        )
+      } catch {
+        // Keep local state when backend is unavailable.
+      }
+    }
+
+    void syncProjectManagementFromBackend()
 
     return () => {
-      window.clearInterval(intervalId)
+      cancelled = true
     }
   }, [hydrated])
 
@@ -473,166 +435,35 @@ export function useMvpStore() {
     return list
   }, [pendingDatasets, registryCandidates, runs])
 
-  function createDataset(input: CreateDatasetInput): void {
-    const name = input.name.trim()
-    const projectIds = Array.from(new Set(input.projectIds.filter((projectId) => projectId.trim().length > 0)))
+  const {
+    createDataset,
+    updateDataset,
+    deleteDataset,
+    createProject,
+    updateProject,
+    updateProjectStatus,
+    deleteProject,
+    createClient,
+    updateClient,
+    deleteClient,
+  } = createControlPlaneActions({
+    clients,
+    datasets,
+    projects,
+    setClients,
+    setDatasets,
+    setProjects,
+    toTimeLabel,
+  })
 
-    if (!name || projectIds.length === 0) {
-      return
-    }
-
-    const newDataset: DatasetRecord = {
-      id: `${nextId('ds')}-${name.toLowerCase().replace(/\s+/g, '-').slice(0, 12)}`,
-      name,
-      type: input.type,
-      versions: 1,
-      status: 'Ready',
-      updated: `Today ${toTimeLabel()}`,
-    }
-
-    setDatasets((prev) => [newDataset, ...prev])
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (!projectIds.includes(project.id)) {
-          return project
-        }
-
-        if (project.datasetIds.includes(newDataset.id)) {
-          return project
-        }
-
-        return {
-          ...project,
-          datasetIds: [...project.datasetIds, newDataset.id],
-          updated: `Today ${toTimeLabel()}`,
-        }
-      }),
-    )
-  }
-
-  function updateDataset(input: UpdateDatasetInput): void {
-    const name = input.name.trim()
-    const projectIds = Array.from(new Set(input.projectIds.filter((projectId) => projectId.trim().length > 0)))
-
-    if (!name || projectIds.length === 0) {
-      return
-    }
-
-    setDatasets((prev) =>
-      prev.map((dataset) => {
-        if (dataset.id !== input.id) {
-          return dataset
-        }
-
-        return {
-          ...dataset,
-          name,
-          type: input.type,
-          updated: `Today ${toTimeLabel()}`,
-        }
-      }),
-    )
-
-    setProjects((prev) =>
-      prev.map((project) => {
-        const shouldInclude = projectIds.includes(project.id)
-        const alreadyIncluded = project.datasetIds.includes(input.id)
-
-        if (shouldInclude && !alreadyIncluded) {
-          return {
-            ...project,
-            datasetIds: [...project.datasetIds, input.id],
-            updated: `Today ${toTimeLabel()}`,
-          }
-        }
-
-        if (!shouldInclude && alreadyIncluded) {
-          return {
-            ...project,
-            datasetIds: project.datasetIds.filter((datasetId) => datasetId !== input.id),
-            updated: `Today ${toTimeLabel()}`,
-          }
-        }
-
-        return project
-      }),
-    )
-  }
-
-  function deleteDataset(datasetId: string): void {
-    setDatasets((prev) => prev.filter((dataset) => dataset.id !== datasetId))
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (!project.datasetIds.includes(datasetId)) {
-          return project
-        }
-
-        return {
-          ...project,
-          datasetIds: project.datasetIds.filter((id) => id !== datasetId),
-          updated: `Today ${toTimeLabel()}`,
-        }
-      }),
-    )
-  }
-
-  function createRun(input: CreateRunInput): void {
-    const project = input.project.trim()
-    const requestedName = input.name.trim()
-    const runNumber = runs.filter((run) => run.project === project).length + 1
-    const defaultName = `${compactIsoDate(new Date())}_Run${String(runNumber).padStart(2, '0')}`
-    const name = requestedName || defaultName
-    const selectedFile = input.selectedFile.trim()
-    if (
-      !name ||
-      !project ||
-      !input.datasetId ||
-      !selectedFile ||
-      input.epochs <= 0 ||
-      input.batchSize <= 0 ||
-      input.learningRate <= 0 ||
-      (input.earlyStopping && input.earlyStoppingPatience <= 0)
-    ) {
-      return
-    }
-
-    const layerNames = buildLayerNames(input.model)
-    const totalEpochs = Math.floor(input.epochs)
-
-    const newRun: RunRecord = {
-      id: nextId('run'),
-      name,
-      project,
-      model: input.model,
-      status: 'Running',
-      progress: 0,
-      updated: `Today ${toTimeLabel()}`,
-      datasetId: input.datasetId,
-      trainingConfig: {
-        selectedFile,
-        epochs: totalEpochs,
-        batchSize: Math.floor(input.batchSize),
-        learningRate: Number(input.learningRate),
-        earlyStopping: input.earlyStopping,
-        earlyStoppingPatience: Math.floor(input.earlyStoppingPatience),
-      },
-      monitor: {
-        currentEpoch: 0,
-        totalEpochs,
-        bestValLoss: Number.POSITIVE_INFINITY,
-        staleEpochs: 0,
-        earlyStopTriggered: false,
-        layerNames,
-        history: [],
-        lastLearningRate: Number(input.learningRate),
-        lastTrainPrecision: 0,
-        lastValPrecision: 0,
-        confusionMatrix: input.model === 'ANN Multiclass' ? [[0, 0, 0], [0, 0, 0], [0, 0, 0]] : [[0, 0], [0, 0]],
-      },
-    }
-
-    setRuns((prev) => [newRun, ...prev])
-  }
+  const { createRun, syncRunWithBackend } = createRunActions({
+    datasets,
+    runs,
+    setRuns,
+    nextId,
+    toTimeLabel,
+    compactIsoDate,
+  })
 
   function advanceRunStatus(runId: string): void {
     setRuns((prev) =>
@@ -961,94 +792,12 @@ export function useMvpStore() {
     )
   }
 
-  function createProject(input: CreateProjectInput): void {
-    const name = input.name.trim()
-    const createdOn = input.createdOn.trim()
-
-    if (!name || !createdOn) {
-      return
-    }
-
-    const datasetIds = Array.from(new Set(input.datasetIds.filter((datasetId) => datasetId.trim().length > 0)))
-    const modelIds = Array.from(new Set(input.modelIds.filter((modelId) => modelId.trim().length > 0)))
-    const modelCombinations = Array.from(
-      new Set(input.modelCombinations.map((item) => item.trim()).filter((item) => item.length > 0)),
-    )
-
-    const newProject: ProjectRecord = {
-      id: nextId('prj'),
-      name,
-      createdOn,
-      status: input.status,
-      networkType: input.networkType,
-      ptStatus: 'Not Created',
-      datasetIds,
-      modelIds,
-      modelCombinations,
-      updated: `Today ${toTimeLabel()}`,
-    }
-
-    setProjects((prev) => [newProject, ...prev])
-  }
-
-  function updateProject(input: UpdateProjectInput): void {
-    const name = input.name.trim()
-    const createdOn = input.createdOn.trim()
-
-    if (!name || !createdOn) {
-      return
-    }
-
-    const datasetIds = Array.from(new Set(input.datasetIds.filter((datasetId) => datasetId.trim().length > 0)))
-    const modelIds = Array.from(new Set(input.modelIds.filter((modelId) => modelId.trim().length > 0)))
-    const modelCombinations = Array.from(
-      new Set(input.modelCombinations.map((item) => item.trim()).filter((item) => item.length > 0)),
-    )
-
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== input.id) {
-          return project
-        }
-
-        return {
-          ...project,
-          name,
-          createdOn,
-          networkType: input.networkType,
-          datasetIds,
-          modelIds,
-          modelCombinations,
-          updated: `Today ${toTimeLabel()}`,
-        }
-      }),
-    )
-  }
-
-  function updateProjectStatus(projectId: string, status: ProjectStatus): void {
-    setProjects((prev) =>
-      prev.map((project) => {
-        if (project.id !== projectId) {
-          return project
-        }
-
-        return {
-          ...project,
-          status,
-          updated: `Today ${toTimeLabel()}`,
-        }
-      }),
-    )
-  }
-
-  function deleteProject(projectId: string): void {
-    setProjects((prev) => prev.filter((project) => project.id !== projectId))
-  }
 
   return {
     activeView,
     setActiveView,
     datasets,
+    clients,
     runs,
     models,
     projects,
@@ -1065,7 +814,11 @@ export function useMvpStore() {
     updateProject,
     updateProjectStatus,
     deleteProject,
+    createClient,
+    updateClient,
+    deleteClient,
     createRun,
+    syncRunWithBackend,
     advanceRunStatus,
     registerModelFromRun,
     createDesignedModel,

@@ -1,10 +1,10 @@
 export const menuItems = [
   'Dashboard',
+  'Clients',
   'Projects',
   'Datasets',
   'Model Design',
   'Runs',
-  'Live Metrics',
   'Model Registry',
   'Settings',
 ] as const

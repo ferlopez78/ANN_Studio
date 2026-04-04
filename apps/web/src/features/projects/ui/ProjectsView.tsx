@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 
 import type {
+  ClientRecord,
   DatasetRecord,
   ModelVersion,
   ProjectNetworkType,
@@ -10,6 +11,7 @@ import type {
 import { AssociationPicker } from '../../../shared/ui/AssociationPicker'
 
 type ProjectFormInput = {
+  clientId: string
   name: string
   createdOn: string
   status: ProjectStatus
@@ -21,18 +23,22 @@ type ProjectFormInput = {
 
 type ProjectsViewProps = {
   projects: ProjectRecord[]
+  clients: ClientRecord[]
   datasets: DatasetRecord[]
   models: ModelVersion[]
-  onCreateProject: (input: ProjectFormInput) => void
-  onUpdateProject: (input: ProjectFormInput & { id: string }) => void
-  onUpdateProjectStatus: (projectId: string, status: ProjectStatus) => void
-  onDeleteProject: (projectId: string) => void
+  onCreateProject: (input: ProjectFormInput) => Promise<void>
+  onUpdateProject: (input: ProjectFormInput & { id: string }) => Promise<void>
+  onUpdateProjectStatus: (projectId: string, status: ProjectStatus) => Promise<void>
+  onDeleteProject: (projectId: string) => Promise<void>
 }
 
 type ProjectViewMode = 'list' | 'create' | 'edit'
+type ProjectSortField = 'name' | 'clientName' | 'createdOn' | 'status' | 'updated'
+type SortDirection = 'asc' | 'desc'
 
 type ProjectFormState = {
   id: string | null
+  clientId: string
   name: string
   createdOn: string
   status: ProjectStatus
@@ -51,6 +57,7 @@ const defaultProjectDate = new Date().toISOString().slice(0, 10)
 function buildEmptyFormState(): ProjectFormState {
   return {
     id: null,
+    clientId: '',
     name: '',
     createdOn: defaultProjectDate,
     status: 'Draft',
@@ -65,6 +72,7 @@ function buildEmptyFormState(): ProjectFormState {
 function buildFormStateFromProject(project: ProjectRecord): ProjectFormState {
   return {
     id: project.id,
+    clientId: project.clientId ?? '',
     name: project.name,
     createdOn: project.createdOn,
     status: project.status,
@@ -79,17 +87,40 @@ function buildFormStateFromProject(project: ProjectRecord): ProjectFormState {
 export function ProjectsView(props: ProjectsViewProps) {
   const [viewMode, setViewMode] = useState<ProjectViewMode>('list')
   const [formState, setFormState] = useState<ProjectFormState>(() => buildEmptyFormState())
+  const [errorMessage, setErrorMessage] = useState('')
   const [currentPage, setCurrentPage] = useState(1)
   const [pageSize, setPageSize] = useState(5)
+  const [sortField, setSortField] = useState<ProjectSortField>('updated')
+  const [sortDirection, setSortDirection] = useState<SortDirection>('desc')
   const [detailsProjectId, setDetailsProjectId] = useState<string | null>(null)
 
-  const totalPages = Math.max(1, Math.ceil(props.projects.length / pageSize))
+  const sortedProjects = useMemo(() => {
+    const next = [...props.projects]
+    next.sort((a, b) => {
+      let base = 0
+      if (sortField === 'name') {
+        base = a.name.localeCompare(b.name)
+      } else if (sortField === 'clientName') {
+        base = (a.clientName ?? '').localeCompare(b.clientName ?? '')
+      } else if (sortField === 'createdOn') {
+        base = a.createdOn.localeCompare(b.createdOn)
+      } else if (sortField === 'status') {
+        base = a.status.localeCompare(b.status)
+      } else {
+        base = a.updated.localeCompare(b.updated)
+      }
+      return sortDirection === 'asc' ? base : -base
+    })
+    return next
+  }, [props.projects, sortDirection, sortField])
+
+  const totalPages = Math.max(1, Math.ceil(sortedProjects.length / pageSize))
   const activePage = Math.min(currentPage, totalPages)
 
   const paginatedProjects = useMemo(() => {
     const start = (activePage - 1) * pageSize
-    return props.projects.slice(start, start + pageSize)
-  }, [activePage, pageSize, props.projects])
+    return sortedProjects.slice(start, start + pageSize)
+  }, [activePage, pageSize, sortedProjects])
 
   const detailsProject = useMemo(
     () => props.projects.find((project) => project.id === detailsProjectId) ?? null,
@@ -124,13 +155,17 @@ export function ProjectsView(props: ProjectsViewProps) {
     [props.models],
   )
 
+  const activeClients = useMemo(() => props.clients.filter((client) => client.status === 'active'), [props.clients])
+
   function openCreateView(): void {
     setFormState(buildEmptyFormState())
+    setErrorMessage('')
     setViewMode('create')
   }
 
   function openEditView(project: ProjectRecord): void {
     setFormState(buildFormStateFromProject(project))
+    setErrorMessage('')
     setViewMode('edit')
   }
 
@@ -170,8 +205,9 @@ export function ProjectsView(props: ProjectsViewProps) {
     }))
   }
 
-  function handleSubmit(): void {
+  async function handleSubmit(): Promise<void> {
     const payload: ProjectFormInput = {
+      clientId: formState.clientId,
       name: formState.name,
       createdOn: formState.createdOn,
       status: formState.status,
@@ -181,16 +217,21 @@ export function ProjectsView(props: ProjectsViewProps) {
       modelCombinations: formState.modelCombinations,
     }
 
-    if (viewMode === 'edit' && formState.id) {
-      props.onUpdateProject({ id: formState.id, ...payload })
-    } else {
-      props.onCreateProject(payload)
-    }
+    try {
+      if (viewMode === 'edit' && formState.id) {
+        await props.onUpdateProject({ id: formState.id, ...payload })
+      } else {
+        await props.onCreateProject(payload)
+      }
 
-    if (formState.name.trim() && formState.createdOn.trim()) {
-      setFormState(buildEmptyFormState())
-      setViewMode('list')
-      setCurrentPage(1)
+      if (formState.name.trim() && formState.createdOn.trim() && formState.clientId) {
+        setFormState(buildEmptyFormState())
+        setViewMode('list')
+        setCurrentPage(1)
+        setErrorMessage('')
+      }
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to persist project')
     }
   }
 
@@ -211,6 +252,18 @@ export function ProjectsView(props: ProjectsViewProps) {
         </div>
 
         <div className="form-grid form-grid-2">
+          <label className="field">
+            Client
+            <select value={formState.clientId} onChange={(event) => updateForm('clientId', event.target.value)}>
+              <option value="">Select client</option>
+              {activeClients.map((client) => (
+                <option key={client.id} value={client.id}>
+                  {client.name} ({client.code})
+                </option>
+              ))}
+            </select>
+          </label>
+
           <label className="field">
             Project Name
             <input value={formState.name} onChange={(event) => updateForm('name', event.target.value)} />
@@ -314,9 +367,11 @@ export function ProjectsView(props: ProjectsViewProps) {
           </AssociationPicker>
         </div>
 
-        <button className="btn btn-primary" onClick={handleSubmit}>
+        <button className="btn btn-primary" onClick={() => void handleSubmit()}>
           {actionLabel}
         </button>
+        {activeClients.length === 0 && <p className="muted-text">Create at least one active client in Clients menu before creating projects.</p>}
+        {errorMessage && <p className="muted-text">{errorMessage}</p>}
       </article>
     )
   }
@@ -329,7 +384,7 @@ export function ProjectsView(props: ProjectsViewProps) {
             <span className="eyebrow">Project Inventory</span>
             <h2>Registered Projects</h2>
           </div>
-          <button className="btn btn-primary" onClick={openCreateView}>
+          <button className="btn btn-primary" onClick={openCreateView} disabled={activeClients.length === 0}>
             Create Project
           </button>
         </div>
@@ -337,6 +392,7 @@ export function ProjectsView(props: ProjectsViewProps) {
         <div className="projects-table">
           <div className="projects-head">
             <span>Project</span>
+            <span>Client</span>
             <span>Created</span>
             <span>Status</span>
             <span>Network</span>
@@ -348,12 +404,13 @@ export function ProjectsView(props: ProjectsViewProps) {
           {paginatedProjects.map((project) => (
             <div key={project.id} className="projects-row">
               <span className="run-name">{project.name}</span>
+              <span>{project.clientName ?? 'Unassigned'}</span>
               <span>{project.createdOn}</span>
               <span>
                 <select
                   className="inline-select"
                   value={project.status}
-                  onChange={(event) => props.onUpdateProjectStatus(project.id, event.target.value as ProjectStatus)}
+                  onChange={(event) => void props.onUpdateProjectStatus(project.id, event.target.value as ProjectStatus)}
                 >
                   {statusOptions.map((status) => (
                     <option key={status}>{status}</option>
@@ -375,16 +432,48 @@ export function ProjectsView(props: ProjectsViewProps) {
                 <button className="btn btn-secondary mini-btn" onClick={() => openEditView(project)}>
                   Edit
                 </button>
-                <button className="btn btn-secondary mini-btn btn-danger" onClick={() => props.onDeleteProject(project.id)}>
-                  Remove
+                <button className="btn btn-secondary mini-btn btn-danger" onClick={() => void props.onDeleteProject(project.id)}>
+                  Archive
                 </button>
               </span>
             </div>
           ))}
         </div>
+        {errorMessage && <p className="muted-text">{errorMessage}</p>}
 
         <div className="pagination-row">
           <div className="pagination-controls">
+            <label className="field pagination-size">
+              Sort By
+              <select
+                value={sortField}
+                onChange={(event) => {
+                  setSortField(event.target.value as ProjectSortField)
+                  setCurrentPage(1)
+                }}
+              >
+                <option value="updated">Updated</option>
+                <option value="name">Project</option>
+                <option value="clientName">Client</option>
+                <option value="createdOn">Created</option>
+                <option value="status">Status</option>
+              </select>
+            </label>
+
+            <label className="field pagination-size">
+              Order
+              <select
+                value={sortDirection}
+                onChange={(event) => {
+                  setSortDirection(event.target.value as SortDirection)
+                  setCurrentPage(1)
+                }}
+              >
+                <option value="asc">Asc</option>
+                <option value="desc">Desc</option>
+              </select>
+            </label>
+
             <button
               className="btn btn-secondary mini-btn"
               onClick={() => setCurrentPage((prev) => Math.max(1, prev - 1))}

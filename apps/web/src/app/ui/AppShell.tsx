@@ -1,5 +1,6 @@
 import { menuItems } from '../../shared/config/navigation'
 import { PlaceholderView } from '../../shared/ui/PlaceholderView'
+import { ClientsView } from '../../features/clients/ui/ClientsView'
 import { DashboardView } from '../../features/dashboard/ui/DashboardView'
 import { DatasetsView } from '../../features/datasets/ui/DatasetsView'
 import { ModelDesignView } from '../../features/model-design/ui/ModelDesignView'
@@ -28,6 +29,7 @@ export function AppShell() {
     activeView,
     setActiveView,
     datasets,
+    clients,
     runs,
     models,
     projects,
@@ -44,8 +46,11 @@ export function AppShell() {
     updateProject,
     updateProjectStatus,
     deleteProject,
+    createClient,
+    updateClient,
+    deleteClient,
     createRun,
-    advanceRunStatus,
+    syncRunWithBackend,
     registerModelFromRun,
     createDesignedModel,
     updateDesignedModel,
@@ -83,10 +88,22 @@ export function AppShell() {
       )
     }
 
+    if (activeView === 'Clients') {
+      return (
+        <ClientsView
+          clients={clients}
+          onCreateClient={createClient}
+          onUpdateClient={updateClient}
+          onDeleteClient={deleteClient}
+        />
+      )
+    }
+
     if (activeView === 'Projects') {
       return (
         <ProjectsView
           projects={projects}
+          clients={clients}
           datasets={datasets}
           models={models}
           onCreateProject={createProject}
@@ -105,7 +122,7 @@ export function AppShell() {
           projects={projects}
           runs={runs}
           onCreateRun={createRun}
-          onAdvanceRunStatus={advanceRunStatus}
+          onSyncRunWithBackend={syncRunWithBackend}
         />
       )
     }
@@ -145,7 +162,7 @@ export function AppShell() {
             <img src={heroLogo} alt="ANN Studio logo" className="brand-mark-image" />
           </div>
           <div>
-            <div className="brand-title">by Braize</div>
+            <div className="brand-title">Powered by Braize</div>
           </div>
         </div>
 
@@ -176,15 +193,6 @@ export function AppShell() {
             <p className="subtitle">
               Operational view across datasets, runs, diagnostics, and model-governance readiness.
             </p>
-          </div>
-
-          <div className="topbar-actions">
-            <button className="btn btn-secondary" onClick={() => setActiveView('Dashboard')}>
-              Dashboard View
-            </button>
-            <button className="btn btn-primary" onClick={() => setActiveView('Runs')}>
-              Start New Run
-            </button>
           </div>
         </header>
 

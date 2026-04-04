@@ -4,6 +4,16 @@ export type RunStatus = 'Queued' | 'Running' | 'Completed' | 'Failed' | 'Review'
 export type ProjectNetworkType = 'ANN Binary' | 'ANN Multiclass' | 'CNN Vision' | 'Custom Detector'
 export type PtArtifactStatus = 'Not Created' | 'Created'
 export type ProjectStatus = 'Draft' | 'Active' | 'Paused' | 'Archived'
+export type ClientStatus = 'active' | 'inactive'
+
+export type ClientRecord = {
+  id: string
+  code: string
+  name: string
+  status: ClientStatus
+  notes?: string
+  updated: string
+}
 
 export type DatasetRecord = {
   id: string
@@ -15,7 +25,11 @@ export type DatasetRecord = {
 }
 
 export type RunTrainingConfig = {
-  selectedFile: string
+  trainFileName: string
+  trainSheet: string
+  valFileName: string
+  valSheet: string
+  labelColumn: string
   epochs: number
   batchSize: number
   learningRate: number
@@ -57,6 +71,24 @@ export type RunRecord = {
   progress: number
   updated: string
   datasetId: string
+  backendRunId?: string
+  backendStatusMessages?: Array<{
+    timestampUtc: string
+    level: 'info' | 'warning' | 'error'
+    message: string
+  }>
+  backendPreprocessingSummary?: {
+    numericScaling: string
+    categoricalEncoding: string
+    numericMissingStrategy: string
+    categoricalMissingStrategy: string
+    rawNumericFeatureCount: number
+    rawCategoricalFeatureCount: number
+    expandedCategoricalFeatureCount: number
+    suggestedInputLayerSize: number
+  }
+  artifactFileName?: string
+  artifactDownloadUrl?: string
   trainingConfig?: RunTrainingConfig
   monitor?: RunLiveMonitor
 }
@@ -79,6 +111,9 @@ export type ModelVersion = {
 
 export type ProjectRecord = {
   id: string
+  code?: string
+  clientId?: string
+  clientName?: string
   name: string
   createdOn: string
   status: ProjectStatus
