@@ -19,6 +19,8 @@ InitializerName = Literal[
     "normal",
     "zeros",
 ]
+OptimizerName = Literal["sgd", "adam", "adamw", "rmsprop", "nadam", "adagrad"]
+SchedulerName = Literal["none", "cosineannealing", "reducelronplateau", "steplr", "onecyclelr", "exponentiallr"]
 
 
 class AnnTrainingError(Exception):
@@ -29,15 +31,32 @@ class AnnTrainingError(Exception):
 class LayerConfig:
     units: int
     activation: ActivationName = "relu"
+    dropout: float = 0.0
     use_bias: bool = True
     weight_initializer: InitializerName = "xavier_uniform"
 
 
 @dataclass(frozen=True)
 class OptimizerConfig:
-    name: Literal["sgd"] = "sgd"
+    name: OptimizerName = "sgd"
     learning_rate: float = 1e-3
     weight_decay: float = 0.0
+    beta1: float = 0.9
+    beta2: float = 0.999
+    epsilon: float = 1e-8
+    rho: float = 0.9
+
+
+@dataclass(frozen=True)
+class SchedulerConfig:
+    name: SchedulerName = "none"
+    gamma: float = 0.98
+    step_size: int = 10
+    min_learning_rate: float = 1e-6
+    max_learning_rate: float = 3e-3
+    warmup_ratio: float = 0.3
+    plateau_patience: int = 5
+    plateau_factor: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -58,11 +77,14 @@ class TabularAnnTrainingConfig:
     output_units: int = 1
     output_activation: ActivationName = "sigmoid"
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     epochs: int = 100
     batch_size: int = 128
     shuffle_within_batch: bool = True
     seed: int = 42
     early_stopping: EarlyStoppingConfig = field(default_factory=EarlyStoppingConfig)
+    validation_features: Sequence[Sequence[float]] = field(default_factory=list)
+    validation_targets: Sequence[Sequence[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -71,10 +93,16 @@ class TabularAnnTrainingResult:
     epochs_completed: int
     best_epoch: int
     train_losses: list[float]
+    train_metrics: list[float]
+    learning_rates: list[float]
+    val_losses: list[float]
+    val_metrics: list[float]
+    val_confusion_matrices: list[list[list[int]]]
     final_train_loss: float
     final_train_metric_name: str
     final_train_metric: float
     class_labels: list[str]
+    trained_layers: list[dict]
 
 
 @dataclass
@@ -82,7 +110,14 @@ class _LayerState:
     w: np.ndarray
     b: np.ndarray
     activation: ActivationName
+    dropout: float
     use_bias: bool
+    m_w: np.ndarray | None = None
+    m_b: np.ndarray | None = None
+    v_w: np.ndarray | None = None
+    v_b: np.ndarray | None = None
+    acc_w: np.ndarray | None = None
+    acc_b: np.ndarray | None = None
 
 
 class _TabularFilePicker:
@@ -276,6 +311,7 @@ class TabularAnnTrainingService:
     def __init__(self) -> None:
         self._picker = _TabularFilePicker()
         self._reader = _TabularBatchReader()
+        self._optimizer_step = 0
 
     def run(self, config: TabularAnnTrainingConfig) -> TabularAnnTrainingResult:
         self._validate_config(config)
@@ -287,34 +323,42 @@ class TabularAnnTrainingService:
         best_epoch = 0
         best_layers_snapshot: list[_LayerState] = []
         train_losses: list[float] = []
+        train_metrics: list[float] = []
+        learning_rates: list[float] = []
+        val_losses: list[float] = []
+        val_metrics: list[float] = []
+        val_confusion_matrices: list[list[list[int]]] = []
         final_metric_name = "accuracy"
         final_metric = 0.0
+        class_index = {value: index for index, value in enumerate(class_labels)}
+        self._optimizer_step = 0
 
         for epoch in range(config.epochs):
+            current_lr = self._resolve_learning_rate(config, epoch, val_losses)
             epoch_loss, metric_name, metric_value = self._train_one_epoch(
                 selected_file=selected_file,
                 config=config,
                 class_labels=class_labels,
+                class_index=class_index,
                 layers=layers,
                 epoch=epoch,
+                learning_rate=current_lr,
             )
             train_losses.append(epoch_loss)
+            train_metrics.append(metric_value)
+            learning_rates.append(current_lr)
+            val_loss, val_metric, val_confusion = self._evaluate_validation(config, class_labels, class_index, layers)
+            val_losses.append(val_loss)
+            val_metrics.append(val_metric)
+            val_confusion_matrices.append(val_confusion)
             final_metric_name = metric_name
             final_metric = metric_value
 
-            improved = best_loss - epoch_loss > config.early_stopping.min_delta
+            improved = best_loss - val_loss > config.early_stopping.min_delta
             if improved:
-                best_loss = epoch_loss
+                best_loss = val_loss
                 best_epoch = epoch + 1
-                best_layers_snapshot = [
-                    _LayerState(
-                        w=np.copy(layer.w),
-                        b=np.copy(layer.b),
-                        activation=layer.activation,
-                        use_bias=layer.use_bias,
-                    )
-                    for layer in layers
-                ]
+                best_layers_snapshot = [self._clone_layer_state(layer) for layer in layers]
 
             if config.early_stopping.enabled and not improved:
                 stale_epochs = (epoch + 1) - best_epoch
@@ -325,6 +369,7 @@ class TabularAnnTrainingService:
                                 w=np.copy(layer.w),
                                 b=np.copy(layer.b),
                                 activation=layer.activation,
+                                dropout=layer.dropout,
                                 use_bias=layer.use_bias,
                             )
                             for layer in best_layers_snapshot
@@ -334,10 +379,16 @@ class TabularAnnTrainingService:
                         epochs_completed=epoch + 1,
                         best_epoch=best_epoch,
                         train_losses=train_losses,
+                        train_metrics=train_metrics,
+                        learning_rates=learning_rates,
+                        val_losses=val_losses,
+                        val_metrics=val_metrics,
+                        val_confusion_matrices=val_confusion_matrices,
                         final_train_loss=float(train_losses[-1]),
                         final_train_metric_name=final_metric_name,
                         final_train_metric=float(final_metric),
                         class_labels=class_labels,
+                        trained_layers=self._export_layers(layers),
                     )
 
         return TabularAnnTrainingResult(
@@ -345,11 +396,92 @@ class TabularAnnTrainingService:
             epochs_completed=config.epochs,
             best_epoch=best_epoch if best_epoch > 0 else config.epochs,
             train_losses=train_losses,
+            train_metrics=train_metrics,
+            learning_rates=learning_rates,
+            val_losses=val_losses,
+            val_metrics=val_metrics,
+            val_confusion_matrices=val_confusion_matrices,
             final_train_loss=float(train_losses[-1]) if train_losses else 0.0,
             final_train_metric_name=final_metric_name,
             final_train_metric=float(final_metric),
             class_labels=class_labels,
+            trained_layers=self._export_layers(layers),
         )
+
+    def _export_layers(self, layers: Sequence[_LayerState]) -> list[dict]:
+        return [
+            {
+                "weights": layer.w.tolist(),
+                "bias": layer.b.tolist(),
+                "activation": layer.activation,
+                "dropout": layer.dropout,
+                "use_bias": layer.use_bias,
+            }
+            for layer in layers
+        ]
+
+    def _clone_layer_state(self, layer: _LayerState) -> _LayerState:
+        return _LayerState(
+            w=np.copy(layer.w),
+            b=np.copy(layer.b),
+            activation=layer.activation,
+            dropout=layer.dropout,
+            use_bias=layer.use_bias,
+            m_w=np.copy(layer.m_w) if layer.m_w is not None else None,
+            m_b=np.copy(layer.m_b) if layer.m_b is not None else None,
+            v_w=np.copy(layer.v_w) if layer.v_w is not None else None,
+            v_b=np.copy(layer.v_b) if layer.v_b is not None else None,
+            acc_w=np.copy(layer.acc_w) if layer.acc_w is not None else None,
+            acc_b=np.copy(layer.acc_b) if layer.acc_b is not None else None,
+        )
+
+    def _resolve_learning_rate(self, config: TabularAnnTrainingConfig, epoch: int, val_losses: Sequence[float]) -> float:
+        base_lr = config.optimizer.learning_rate
+        scheduler = config.scheduler
+        name = scheduler.name
+
+        if name == "none":
+            return base_lr
+
+        if name == "steplr":
+            factor = scheduler.gamma ** (epoch // max(1, scheduler.step_size))
+            return max(scheduler.min_learning_rate, base_lr * factor)
+
+        if name == "exponentiallr":
+            factor = scheduler.gamma ** epoch
+            return max(scheduler.min_learning_rate, base_lr * factor)
+
+        if name == "cosineannealing":
+            if config.epochs <= 1:
+                return base_lr
+            cosine = 0.5 * (1 + math.cos(math.pi * epoch / (config.epochs - 1)))
+            return scheduler.min_learning_rate + (base_lr - scheduler.min_learning_rate) * cosine
+
+        if name == "onecyclelr":
+            max_lr = max(base_lr, scheduler.max_learning_rate)
+            warm_epochs = max(1, int(config.epochs * scheduler.warmup_ratio))
+            if epoch < warm_epochs:
+                progress = epoch / warm_epochs
+                return base_lr + (max_lr - base_lr) * progress
+            cool_epochs = max(1, config.epochs - warm_epochs)
+            cool_progress = (epoch - warm_epochs) / cool_epochs
+            return max(scheduler.min_learning_rate, max_lr - (max_lr - scheduler.min_learning_rate) * cool_progress)
+
+        if name == "reducelronplateau":
+            if len(val_losses) <= scheduler.plateau_patience:
+                return base_lr
+
+            best_loss = min(val_losses)
+            stale = 0
+            for value in reversed(val_losses):
+                if value <= best_loss + 1e-10:
+                    break
+                stale += 1
+
+            decay_steps = stale // max(1, scheduler.plateau_patience)
+            return max(scheduler.min_learning_rate, base_lr * (scheduler.plateau_factor**decay_steps))
+
+        raise AnnTrainingError(f"Unsupported scheduler: {name}")
 
     def _collect_class_labels(self, selected_file: Path, config: TabularAnnTrainingConfig) -> list[str]:
         labels: set[str] = set()
@@ -406,15 +538,15 @@ class TabularAnnTrainingService:
         selected_file: Path,
         config: TabularAnnTrainingConfig,
         class_labels: Sequence[str],
+        class_index: dict[str, int],
         layers: list[_LayerState],
         epoch: int,
+        learning_rate: float,
     ) -> tuple[float, str, float]:
         losses: list[float] = []
         total_samples = 0
         total_correct = 0
         regression_abs_error = 0.0
-        class_index = {value: index for index, value in enumerate(class_labels)}
-
         for x_batch, _, y_raw in self._reader.iter_batches(
             file_path=selected_file,
             feature_columns=config.feature_columns,
@@ -425,7 +557,8 @@ class TabularAnnTrainingService:
             epoch=epoch,
         ):
             y_batch = self._encode_targets(config, y_raw, class_index)
-            activations, pre_activations = self._forward(layers, x_batch)
+            rng = np.random.default_rng(config.seed + (epoch + 1) * 9973 + total_samples + len(x_batch))
+            activations, pre_activations, dropout_masks = self._forward(layers, x_batch, training=True, rng=rng)
             y_pred = activations[-1]
 
             loss_value, dloss = self._loss_and_gradient(config.task_type, y_batch, y_pred)
@@ -435,10 +568,11 @@ class TabularAnnTrainingService:
                 layers=layers,
                 activations=activations,
                 pre_activations=pre_activations,
+                dropout_masks=dropout_masks,
                 dloss=dloss,
                 skip_output_activation_derivative=config.task_type != "regression",
             )
-            self._apply_gradients(layers, grads_w, grads_b, config.optimizer)
+            self._apply_gradients(layers, grads_w, grads_b, config.optimizer, learning_rate)
 
             batch_size = len(x_batch)
             total_samples += batch_size
@@ -458,6 +592,56 @@ class TabularAnnTrainingService:
         mae = float(regression_abs_error / max(total_samples, 1))
         return avg_loss, "mae", mae
 
+    def _evaluate_validation(
+        self,
+        config: TabularAnnTrainingConfig,
+        class_labels: Sequence[str],
+        class_index: dict[str, int],
+        layers: Sequence[_LayerState],
+    ) -> tuple[float, float, list[list[int]]]:
+        if not config.validation_features or not config.validation_targets:
+            # Fallbacks keep API stable if validation rows are not available.
+            size = len(class_labels) if config.task_type == "multiclass_classification" else 2
+            return 0.0, 0.0, [[0 for _ in range(size)] for _ in range(size)]
+
+        try:
+            x_val = np.asarray(config.validation_features, dtype=np.float64)
+        except ValueError as exc:
+            raise AnnTrainingError("Validation feature values must be numeric.") from exc
+
+        y_true = self._encode_targets(config.task_type, config.validation_targets, class_index)
+        activations, _, _ = self._forward(layers, x_val, training=False, rng=None)
+        y_pred = activations[-1]
+        loss, _ = self._loss_and_gradient(config.task_type, y_true, y_pred)
+
+        if config.task_type == "regression":
+            mae = float(np.mean(np.abs(y_pred - y_true)))
+            return float(loss), mae, [[0, 0], [0, 0]]
+
+        metric = float(self._count_correct_predictions(config.task_type, y_true, y_pred) / max(len(x_val), 1))
+        confusion = self._build_confusion_matrix(config.task_type, y_true, y_pred)
+        return float(loss), metric, confusion
+
+    def _build_confusion_matrix(self, task_type: TaskType, y_true: np.ndarray, y_pred: np.ndarray) -> list[list[int]]:
+        if task_type == "binary_classification":
+            truth = y_true.reshape(-1).astype(np.int64)
+            pred = (y_pred.reshape(-1) >= 0.5).astype(np.int64)
+            matrix = [[0, 0], [0, 0]]
+            for t, p in zip(truth, pred):
+                matrix[int(t)][int(p)] += 1
+            return matrix
+
+        if task_type == "multiclass_classification":
+            truth = np.argmax(y_true, axis=1)
+            pred = np.argmax(y_pred, axis=1)
+            size = int(y_true.shape[1])
+            matrix = [[0 for _ in range(size)] for _ in range(size)]
+            for t, p in zip(truth, pred):
+                matrix[int(t)][int(p)] += 1
+            return matrix
+
+        return [[0, 0], [0, 0]]
+
     def _encode_targets(
         self,
         task_type: TaskType,
@@ -466,6 +650,9 @@ class TabularAnnTrainingService:
     ) -> np.ndarray:
         if task_type == "binary_classification":
             positive = sorted(class_index.keys())[1]
+            for value_row in raw_targets:
+                if value_row[0] not in class_index:
+                    raise AnnTrainingError(f"Unknown class label in target: {value_row[0]}")
             values = np.asarray(
                 [[1.0 if value_row[0] == positive else 0.0] for value_row in raw_targets],
                 dtype=np.float64,
@@ -475,6 +662,8 @@ class TabularAnnTrainingService:
         if task_type == "multiclass_classification":
             output = np.zeros((len(raw_targets), len(class_index)), dtype=np.float64)
             for row_idx, value_row in enumerate(raw_targets):
+                if value_row[0] not in class_index:
+                    raise AnnTrainingError(f"Unknown class label in target: {value_row[0]}")
                 output[row_idx, class_index[value_row[0]]] = 1.0
             return output
 
@@ -502,6 +691,7 @@ class TabularAnnTrainingService:
             out_dim = sizes[layer_index + 1]
             layer_cfg = layout[layer_index]
             activation = layer_cfg.activation if layer_index < len(config.hidden_layers) else config.output_activation
+            dropout = layer_cfg.dropout if layer_index < len(config.hidden_layers) else 0.0
 
             weights = self._init_weights(
                 rng=rng,
@@ -511,27 +701,46 @@ class TabularAnnTrainingService:
             )
             bias = np.zeros((1, out_dim), dtype=np.float64) if layer_cfg.use_bias else np.zeros((1, out_dim), dtype=np.float64)
 
-            layers.append(_LayerState(w=weights, b=bias, activation=activation, use_bias=layer_cfg.use_bias))
+            layers.append(_LayerState(w=weights, b=bias, activation=activation, dropout=dropout, use_bias=layer_cfg.use_bias))
 
         return layers
 
-    def _forward(self, layers: Sequence[_LayerState], x: np.ndarray) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    def _forward(
+        self,
+        layers: Sequence[_LayerState],
+        x: np.ndarray,
+        training: bool,
+        rng: np.random.Generator | None,
+    ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray | None]]:
         activations = [x]
         pre_activations: list[np.ndarray] = []
+        dropout_masks: list[np.ndarray | None] = []
 
-        for layer in layers:
+        for index, layer in enumerate(layers):
             z = activations[-1] @ layer.w + (layer.b if layer.use_bias else 0.0)
             a = self._activate(layer.activation, z)
+
+            mask: np.ndarray | None = None
+            is_output = index == len(layers) - 1
+            if training and not is_output and layer.dropout > 0:
+                if rng is None:
+                    rng = np.random.default_rng()
+                keep_probability = max(1e-8, 1.0 - layer.dropout)
+                mask = (rng.random(a.shape) < keep_probability).astype(np.float64) / keep_probability
+                a = a * mask
+
             pre_activations.append(z)
             activations.append(a)
+            dropout_masks.append(mask)
 
-        return activations, pre_activations
+        return activations, pre_activations, dropout_masks
 
     def _backward(
         self,
         layers: Sequence[_LayerState],
         activations: Sequence[np.ndarray],
         pre_activations: Sequence[np.ndarray],
+        dropout_masks: Sequence[np.ndarray | None],
         dloss: np.ndarray,
         skip_output_activation_derivative: bool,
     ) -> tuple[list[np.ndarray], list[np.ndarray]]:
@@ -544,6 +753,10 @@ class TabularAnnTrainingService:
             z = pre_activations[idx]
             a_prev = activations[idx]
             is_output = idx == len(layers) - 1
+
+            if not is_output and dropout_masks[idx] is not None:
+                delta = delta * dropout_masks[idx]
+
             if not (is_output and skip_output_activation_derivative):
                 delta = delta * self._activation_derivative(layer.activation, z)
 
@@ -564,15 +777,90 @@ class TabularAnnTrainingService:
         grads_w: Sequence[np.ndarray],
         grads_b: Sequence[np.ndarray],
         optimizer: OptimizerConfig,
+        learning_rate: float,
     ) -> None:
-        if optimizer.name != "sgd":
-            raise AnnTrainingError(f"Unsupported optimizer: {optimizer.name}")
+        self._optimizer_step += 1
+        step = self._optimizer_step
 
         for idx, layer in enumerate(layers):
-            wd_term = optimizer.weight_decay * layer.w if optimizer.weight_decay > 0 else 0.0
-            layer.w -= optimizer.learning_rate * (grads_w[idx] + wd_term)
-            if layer.use_bias:
-                layer.b -= optimizer.learning_rate * grads_b[idx]
+            grad_w = grads_w[idx]
+            grad_b = grads_b[idx]
+
+            if optimizer.name == "sgd":
+                wd_term = optimizer.weight_decay * layer.w if optimizer.weight_decay > 0 else 0.0
+                layer.w -= learning_rate * (grad_w + wd_term)
+                if layer.use_bias:
+                    layer.b -= learning_rate * grad_b
+                continue
+
+            if optimizer.name == "adagrad":
+                if layer.acc_w is None:
+                    layer.acc_w = np.zeros_like(layer.w)
+                if layer.acc_b is None:
+                    layer.acc_b = np.zeros_like(layer.b)
+
+                reg_grad_w = grad_w + optimizer.weight_decay * layer.w
+                layer.acc_w += reg_grad_w**2
+                if layer.use_bias:
+                    layer.acc_b += grad_b**2
+
+                layer.w -= learning_rate * reg_grad_w / (np.sqrt(layer.acc_w) + optimizer.epsilon)
+                if layer.use_bias:
+                    layer.b -= learning_rate * grad_b / (np.sqrt(layer.acc_b) + optimizer.epsilon)
+                continue
+
+            if optimizer.name == "rmsprop":
+                if layer.v_w is None:
+                    layer.v_w = np.zeros_like(layer.w)
+                if layer.v_b is None:
+                    layer.v_b = np.zeros_like(layer.b)
+
+                reg_grad_w = grad_w + optimizer.weight_decay * layer.w
+                layer.v_w = optimizer.rho * layer.v_w + (1 - optimizer.rho) * (reg_grad_w**2)
+                if layer.use_bias:
+                    layer.v_b = optimizer.rho * layer.v_b + (1 - optimizer.rho) * (grad_b**2)
+
+                layer.w -= learning_rate * reg_grad_w / (np.sqrt(layer.v_w) + optimizer.epsilon)
+                if layer.use_bias:
+                    layer.b -= learning_rate * grad_b / (np.sqrt(layer.v_b) + optimizer.epsilon)
+                continue
+
+            if optimizer.name in ("adam", "adamw", "nadam"):
+                if layer.m_w is None:
+                    layer.m_w = np.zeros_like(layer.w)
+                if layer.v_w is None:
+                    layer.v_w = np.zeros_like(layer.w)
+                if layer.m_b is None:
+                    layer.m_b = np.zeros_like(layer.b)
+                if layer.v_b is None:
+                    layer.v_b = np.zeros_like(layer.b)
+
+                reg_grad_w = grad_w if optimizer.name == "adamw" else grad_w + optimizer.weight_decay * layer.w
+
+                layer.m_w = optimizer.beta1 * layer.m_w + (1 - optimizer.beta1) * reg_grad_w
+                layer.v_w = optimizer.beta2 * layer.v_w + (1 - optimizer.beta2) * (reg_grad_w**2)
+
+                m_w_hat = layer.m_w / (1 - optimizer.beta1**step)
+                v_w_hat = layer.v_w / (1 - optimizer.beta2**step)
+
+                if optimizer.name == "nadam":
+                    m_w_hat = optimizer.beta1 * m_w_hat + ((1 - optimizer.beta1) * reg_grad_w) / (1 - optimizer.beta1**step)
+
+                if optimizer.name == "adamw" and optimizer.weight_decay > 0:
+                    layer.w -= learning_rate * optimizer.weight_decay * layer.w
+                layer.w -= learning_rate * m_w_hat / (np.sqrt(v_w_hat) + optimizer.epsilon)
+
+                if layer.use_bias:
+                    layer.m_b = optimizer.beta1 * layer.m_b + (1 - optimizer.beta1) * grad_b
+                    layer.v_b = optimizer.beta2 * layer.v_b + (1 - optimizer.beta2) * (grad_b**2)
+                    m_b_hat = layer.m_b / (1 - optimizer.beta1**step)
+                    v_b_hat = layer.v_b / (1 - optimizer.beta2**step)
+                    if optimizer.name == "nadam":
+                        m_b_hat = optimizer.beta1 * m_b_hat + ((1 - optimizer.beta1) * grad_b) / (1 - optimizer.beta1**step)
+                    layer.b -= learning_rate * m_b_hat / (np.sqrt(v_b_hat) + optimizer.epsilon)
+                continue
+
+            raise AnnTrainingError(f"Unsupported optimizer: {optimizer.name}")
 
     def _loss_and_gradient(self, task_type: TaskType, y_true: np.ndarray, y_pred: np.ndarray) -> tuple[float, np.ndarray]:
         eps = 1e-8
@@ -693,3 +981,11 @@ class TabularAnnTrainingService:
         for idx, layer in enumerate(config.hidden_layers):
             if layer.units <= 0:
                 raise AnnTrainingError(f"hidden layer {idx + 1} units must be > 0")
+            if layer.dropout < 0 or layer.dropout >= 1:
+                raise AnnTrainingError(f"hidden layer {idx + 1} dropout must be in [0, 1)")
+
+        if config.optimizer.name not in ("sgd", "adam", "adamw", "rmsprop", "nadam", "adagrad"):
+            raise AnnTrainingError(f"Unsupported optimizer: {config.optimizer.name}")
+
+        if config.scheduler.name not in ("none", "cosineannealing", "reducelronplateau", "steplr", "onecyclelr", "exponentiallr"):
+            raise AnnTrainingError(f"Unsupported scheduler: {config.scheduler.name}")

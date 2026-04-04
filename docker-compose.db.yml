@@ -1,0 +1,19 @@
+version: '3.9'
+
+services:
+  annstudio-postgres:
+    image: postgres:16
+    container_name: annstudio-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: annstudio
+      POSTGRES_USER: annstudio
+      POSTGRES_PASSWORD: annstudio
+    ports:
+      - '5432:5432'
+    volumes:
+      - annstudio_pgdata:/var/lib/postgresql/data
+      - ./apps/api/src/features/project_management/infrastructure/sql:/docker-entrypoint-initdb.d
+
+volumes:
+  annstudio_pgdata:
