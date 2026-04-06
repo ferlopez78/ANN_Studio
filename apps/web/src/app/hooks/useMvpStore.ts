@@ -17,8 +17,6 @@ import {
 } from '../../features/model-design/services/artifactStorage'
 import type { GeneratedModelArtifact, ModelDesignDraft } from '../../features/model-design/types'
 import { menuItems } from '../../shared/config/navigation'
-import { initialDatasets, initialModels, initialProjects, initialRuns } from '../../shared/config/seeds'
-import { clearDatabase, loadFromDatabase, saveToDatabase } from '../../shared/lib/browserDb'
 import type {
   DatasetRecord,
   ClientRecord,
@@ -31,18 +29,6 @@ import type {
 } from '../../shared/types/mvp'
 
 export type MenuItem = (typeof menuItems)[number]
-
-const DATASETS_KEY = 'annstudio_v2_datasets'
-const CLIENTS_KEY = 'annstudio_v2_clients'
-const RUNS_KEY = 'annstudio_v2_runs'
-const MODELS_KEY = 'annstudio_v2_models'
-const PROJECTS_KEY = 'annstudio_v2_projects'
-const LEGACY_DATASETS_KEY = 'annstudio_datasets'
-const LEGACY_CLIENTS_KEY = 'annstudio_clients'
-const LEGACY_RUNS_KEY = 'annstudio_runs'
-const LEGACY_MODELS_KEY = 'annstudio_models'
-const LEGACY_PROJECTS_KEY = 'annstudio_projects'
-const RESET_MARKER_KEY = 'annstudio_reset_done_v1'
 let idSequence = 1000
 const artifactGenerator = new LocalModelArtifactGenerator()
 
@@ -58,88 +44,6 @@ function toTimeLabel(): string {
 
 function compactIsoDate(value: Date): string {
   return value.toISOString().slice(0, 10).replace(/-/g, '')
-}
-
-function ensureUniqueId(baseId: string, prefix: string, used: Set<string>): string {
-  const seed = baseId.trim() || nextId(prefix)
-  if (!used.has(seed)) {
-    used.add(seed)
-    return seed
-  }
-
-  let index = 2
-  let candidate = `${seed}-${index}`
-  while (used.has(candidate)) {
-    index += 1
-    candidate = `${seed}-${index}`
-  }
-
-  used.add(candidate)
-  return candidate
-}
-
-function normalizeWithUniqueIds<T extends { id: string }>(
-  items: T[],
-  prefix: string,
-): { items: T[]; idMap: Map<string, string> } {
-  const used = new Set<string>()
-  const idMap = new Map<string, string>()
-
-  const normalized = items.map((item) => {
-    const next = ensureUniqueId(item.id, prefix, used)
-    if (!idMap.has(item.id)) {
-      idMap.set(item.id, next)
-    }
-
-    return {
-      ...item,
-      id: next,
-    }
-  })
-
-  return { items: normalized, idMap }
-}
-
-function sanitizeHydratedStore(input: {
-  datasets: DatasetRecord[]
-  runs: RunRecord[]
-  models: ModelVersion[]
-  projects: ProjectRecord[]
-}): {
-  datasets: DatasetRecord[]
-  runs: RunRecord[]
-  models: ModelVersion[]
-  projects: ProjectRecord[]
-} {
-  const normalizedDatasets = normalizeWithUniqueIds(input.datasets, 'ds')
-  const normalizedRuns = normalizeWithUniqueIds(input.runs, 'run')
-  const normalizedModels = normalizeWithUniqueIds(input.models, 'mdl')
-  const normalizedProjects = normalizeWithUniqueIds(input.projects, 'prj')
-
-  const runs = normalizedRuns.items.map((run) => ({
-    ...run,
-    datasetId: normalizedDatasets.idMap.get(run.datasetId) ?? run.datasetId,
-  }))
-
-  const models = normalizedModels.items.map((model) => ({
-    ...model,
-    sourceRunId: normalizedRuns.idMap.get(model.sourceRunId) ?? model.sourceRunId,
-    datasetIds: normalizeIds((model.datasetIds ?? []).map((id) => normalizedDatasets.idMap.get(id) ?? id)),
-    projectIds: normalizeIds((model.projectIds ?? []).map((id) => normalizedProjects.idMap.get(id) ?? id)),
-  }))
-
-  const projects = normalizedProjects.items.map((project) => ({
-    ...project,
-    datasetIds: normalizeIds(project.datasetIds.map((id) => normalizedDatasets.idMap.get(id) ?? id)),
-    modelIds: normalizeIds(project.modelIds.map((id) => normalizedModels.idMap.get(id) ?? id)),
-  }))
-
-  return {
-    datasets: normalizedDatasets.items,
-    runs,
-    models,
-    projects,
-  }
 }
 
 function getNextRunStatus(current: RunStatus): RunStatus {
@@ -174,114 +78,13 @@ function toClientRecord(input: {
 
 export function useMvpStore() {
   const [activeView, setActiveView] = useState<MenuItem>('Dashboard')
-  const [datasets, setDatasets] = useState<DatasetRecord[]>(initialDatasets)
+  const [datasets, setDatasets] = useState<DatasetRecord[]>([])
   const [clients, setClients] = useState<ClientRecord[]>([])
-  const [runs, setRuns] = useState<RunRecord[]>(initialRuns)
-  const [models, setModels] = useState<ModelVersion[]>(initialModels)
-  const [projects, setProjects] = useState<ProjectRecord[]>(initialProjects)
-  const [hydrated, setHydrated] = useState(false)
-  const [idRepairApplied, setIdRepairApplied] = useState(false)
+  const [runs, setRuns] = useState<RunRecord[]>([])
+  const [models, setModels] = useState<ModelVersion[]>([])
+  const [projects, setProjects] = useState<ProjectRecord[]>([])
 
   useEffect(() => {
-    let mounted = true
-
-    async function hydrateStore() {
-      const resetAlreadyDone = window.localStorage.getItem(RESET_MARKER_KEY) === '1'
-      if (!resetAlreadyDone) {
-        await clearDatabase([
-          DATASETS_KEY,
-          CLIENTS_KEY,
-          RUNS_KEY,
-          MODELS_KEY,
-          PROJECTS_KEY,
-          LEGACY_DATASETS_KEY,
-          LEGACY_CLIENTS_KEY,
-          LEGACY_RUNS_KEY,
-          LEGACY_MODELS_KEY,
-          LEGACY_PROJECTS_KEY,
-        ])
-        window.localStorage.setItem(RESET_MARKER_KEY, '1')
-      }
-
-      const [savedDatasets, savedClients, savedRuns, savedModels, savedProjects] = await Promise.all([
-        loadFromDatabase(DATASETS_KEY, initialDatasets),
-        loadFromDatabase(CLIENTS_KEY, [] as ClientRecord[]),
-        loadFromDatabase(RUNS_KEY, initialRuns),
-        loadFromDatabase(MODELS_KEY, initialModels),
-        loadFromDatabase(PROJECTS_KEY, initialProjects),
-      ])
-
-      const sanitized = sanitizeHydratedStore({
-        datasets: savedDatasets,
-        runs: savedRuns,
-        models: savedModels,
-        projects: savedProjects,
-      })
-
-      if (!mounted) {
-        return
-      }
-
-      setDatasets(sanitized.datasets)
-      setClients(savedClients)
-      setRuns(sanitized.runs)
-      setModels(sanitized.models)
-      setProjects(sanitized.projects)
-      setHydrated(true)
-    }
-
-    void hydrateStore()
-
-    return () => {
-      mounted = false
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!hydrated) {
-      return
-    }
-
-    void saveToDatabase(DATASETS_KEY, datasets)
-  }, [datasets, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) {
-      return
-    }
-
-    void saveToDatabase(CLIENTS_KEY, clients)
-  }, [clients, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) {
-      return
-    }
-
-    void saveToDatabase(RUNS_KEY, runs)
-  }, [runs, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) {
-      return
-    }
-
-    void saveToDatabase(MODELS_KEY, models)
-  }, [models, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) {
-      return
-    }
-
-    void saveToDatabase(PROJECTS_KEY, projects)
-  }, [projects, hydrated])
-
-  useEffect(() => {
-    if (!hydrated) {
-      return
-    }
-
     let cancelled = false
 
     async function syncProjectManagementFromBackend(): Promise<void> {
@@ -355,26 +158,7 @@ export function useMvpStore() {
     return () => {
       cancelled = true
     }
-  }, [hydrated])
-
-  useEffect(() => {
-    if (!hydrated || idRepairApplied) {
-      return
-    }
-
-    const sanitized = sanitizeHydratedStore({
-      datasets,
-      runs,
-      models,
-      projects,
-    })
-
-    setDatasets(sanitized.datasets)
-    setRuns(sanitized.runs)
-    setModels(sanitized.models)
-    setProjects(sanitized.projects)
-    setIdRepairApplied(true)
-  }, [datasets, hydrated, idRepairApplied, models, projects, runs])
+  }, [])
 
   const completedRuns = runs.filter((run) => run.status === 'Completed').length
   const runningRuns = runs.filter((run) => run.status === 'Running').length

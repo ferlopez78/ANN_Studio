@@ -33,16 +33,26 @@ export type ProjectRecordApi = {
 }
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? 'http://localhost:8000'
-const TENANT_ID =
-  (import.meta.env.VITE_TENANT_ID as string | undefined) ?? '1'
-const USER_ID =
-  (import.meta.env.VITE_USER_ID as string | undefined) ?? '1'
+const TENANT_ID = (import.meta.env.VITE_TENANT_ID as string | undefined)?.trim()
+const USER_ID = (import.meta.env.VITE_USER_ID as string | undefined)?.trim()
+
+function assertAuthContext(): { tenantId: string; userId: string } {
+  if (!TENANT_ID || !USER_ID) {
+    throw new Error('Missing VITE_TENANT_ID or VITE_USER_ID in frontend environment.')
+  }
+
+  return {
+    tenantId: TENANT_ID,
+    userId: USER_ID,
+  }
+}
 
 function headers(): HeadersInit {
+  const auth = assertAuthContext()
   return {
     'Content-Type': 'application/json',
-    'X-Tenant-Id': TENANT_ID,
-    'X-User-Id': USER_ID,
+    'X-Tenant-Id': auth.tenantId,
+    'X-User-Id': auth.userId,
   }
 }
 

@@ -1,5 +1,3 @@
-import { loadFromDatabase, saveToDatabase } from '../../../shared/lib/browserDb'
-
 type StoredArtifact = {
   artifactUri: string
   fileName: string
@@ -15,8 +13,7 @@ type StoreArtifactInput = {
   payload: string
   generatedAtIso: string
 }
-
-const ARTIFACTS_KEY = 'annstudio_model_artifacts'
+const artifactIndex: ArtifactIndex = {}
 
 function triggerArtifactDownload(fileName: string, payload: string): void {
   const blob = new Blob([payload], { type: 'application/octet-stream' })
@@ -29,11 +26,14 @@ function triggerArtifactDownload(fileName: string, payload: string): void {
 }
 
 async function readArtifactIndex(): Promise<ArtifactIndex> {
-  return loadFromDatabase<ArtifactIndex>(ARTIFACTS_KEY, {})
+  return artifactIndex
 }
 
 async function writeArtifactIndex(index: ArtifactIndex): Promise<void> {
-  await saveToDatabase(ARTIFACTS_KEY, index)
+  Object.keys(artifactIndex).forEach((key) => {
+    delete artifactIndex[key]
+  })
+  Object.assign(artifactIndex, index)
 }
 
 export function buildModelArtifactUri(modelId: string, fileName: string): string {

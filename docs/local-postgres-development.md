@@ -52,5 +52,5 @@ psql "postgresql://annstudio:annstudio@localhost:5432/annstudio"
 ## Notes
 
 - `001_init_project_management.sql` creates tenants/users/clients/projects.
-- `002_seed_example.sql` inserts test tenant and user.
 - `003_control_plane_foundation.sql` creates base tables for datasets, models, runs, metrics, registry, and audit.
+- You must create your tenant/user records in PostgreSQL before calling protected `/api/*` endpoints.

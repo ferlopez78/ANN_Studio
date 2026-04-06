@@ -21,7 +21,6 @@ These headers emulate identity claims until auth integration is completed.
 ## Migration SQL
 
 - 001_init_project_management.sql
-- 002_seed_example.sql
 - 003_control_plane_foundation.sql
 
 When AUTO_MIGRATE_PROJECT_DB is true, schema migration 001 runs at API startup.
